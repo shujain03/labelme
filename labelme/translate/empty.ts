@@ -97,6 +97,16 @@
     </message>
     <message>
         <location filename="../app.py" line="198"/>
+        <source>&amp;Next Dir</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="198"/>
+        <source>&amp;Prev Dir</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="198"/>
         <source>Open prev (hold Ctl+Shift to copy labels)</source>
         <translation type="unfinished"></translation>
     </message>

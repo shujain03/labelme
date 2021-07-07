@@ -5,6 +5,7 @@ from qtpy import QtWidgets
 from labelme import QT5
 from labelme.shape import Shape
 import labelme.utils
+import math
 
 
 # TODO(unknown):
@@ -196,7 +197,7 @@ class Canvas(QtWidgets.QWidget):
         # Polygon drawing.
         if self.drawing():
             self.line.shape_type = self.createMode
-
+            
             self.overrideCursor(CURSOR_DRAW)
             if not self.current:
                 return
@@ -264,7 +265,7 @@ class Canvas(QtWidgets.QWidget):
         # - Highlight shapes
         # - Highlight vertex
         # Update shape/vertex fill and tooltip value accordingly.
-        self.setToolTip(self.tr("Image"))
+        # self.setToolTip(self.tr("Image"))
         for shape in reversed([s for s in self.shapes if self.isVisible(s)]):
             # Look for a nearby vertex to highlight. If that fails,
             # check if we happen to be inside a shape.
@@ -278,7 +279,7 @@ class Canvas(QtWidgets.QWidget):
                 self.prevhEdge = self.hEdge = index_edge
                 shape.highlightVertex(index, shape.MOVE_VERTEX)
                 self.overrideCursor(CURSOR_POINT)
-                self.setToolTip(self.tr("Click & drag to move point"))
+                # self.setToolTip(self.tr("Click & drag to move point"))
                 self.setStatusTip(self.toolTip())
                 self.update()
                 break
@@ -289,9 +290,9 @@ class Canvas(QtWidgets.QWidget):
                 self.hVertex = None
                 self.prevhShape = self.hShape = shape
                 self.prevhEdge = self.hEdge = index_edge
-                self.setToolTip(
-                    self.tr("Click & drag to move shape '%s'") % shape.label
-                )
+                # self.setToolTip(
+                #     self.tr("Click & drag to move shape '%s'") % shape.label
+                # )
                 self.setStatusTip(self.toolTip())
                 self.overrideCursor(CURSOR_GRAB)
                 self.update()
@@ -603,7 +604,15 @@ class Canvas(QtWidgets.QWidget):
 
     def transformPos(self, point):
         """Convert from widget-logical coordinates to painter-logical ones."""
-        return point / self.scale - self.offsetToCenter()
+        pt = point / self.scale - self.offsetToCenter()
+        print('cur pos', round(pt.x()), ', ', round(pt.y()))
+        mouse_coordinates_text = str(
+            round(pt.x())) + ', '+str(round(pt.y()))
+        self.setToolTip(mouse_coordinates_text)
+        self.show()
+        # self.mouse_coordinates_label.text = mouse_coordinates_text
+        # self.mouse_coord
+        return pt
 
     def offsetToCenter(self):
         s = self.scale

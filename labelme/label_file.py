@@ -3,6 +3,8 @@ import contextlib
 import io
 import json
 import os.path as osp
+import numpy as np
+import cv2
 
 import PIL.Image
 
@@ -189,10 +191,20 @@ class LabelFile(object):
             flags=flags,
             shapes=shapes,
             imagePath=imagePath,
-            imageData=imageData,
+            imageData=None, # don't save data
             imageHeight=imageHeight,
             imageWidth=imageWidth,
         )
+        labelfilename = filename.split('/')[-1].split('.')[0]+'_Label.png'
+        filepath = '/'.join(filename.split('/')[:-1])+'/'
+        label_img = np.zeros((imageHeight, imageWidth)).astype(np.uint8)
+        for each_shape in shapes:
+            # fill with 255 value in the 8 bit image.
+            contours = np.array(each_shape['points']).astype(np.int32)
+            cv2.fillPoly(label_img, pts =np.int32([contours]), color=(255,255,255))
+            
+        cv2.imwrite(filepath+labelfilename, label_img)
+            
         for key, value in otherData.items():
             assert key not in data
             data[key] = value

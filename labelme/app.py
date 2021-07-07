@@ -5,13 +5,20 @@ import math
 import os
 import os.path as osp
 import re
+import time
 import webbrowser
 
 import imgviz
+import threading
+
+from PyQt5.QtWidgets import QProgressBar, QProgressDialog
 from qtpy import QtCore
 from qtpy.QtCore import Qt
 from qtpy import QtGui
 from qtpy import QtWidgets
+from qtpy.QtWidgets import QLabel
+from qtpy.QtWidgets import QFrame
+import csv
 
 from labelme import __appname__
 from labelme import PY2
@@ -31,7 +38,9 @@ from labelme.widgets import LabelListWidgetItem
 from labelme.widgets import ToolBar
 from labelme.widgets import UniqueLabelQListWidget
 from labelme.widgets import ZoomWidget
-
+from multiprocessing import Pool
+from utils.csv_to_json_gen import generate_mapping_from_csv
+from utils.csv_to_json_gen import generate_json_using_csv
 
 # FIXME
 # - [medium] Set max zoom value to something big enough for FitWidth/Window
@@ -47,16 +56,15 @@ LABEL_COLORMAP = imgviz.label_colormap(value=200)
 
 
 class MainWindow(QtWidgets.QMainWindow):
-
     FIT_WINDOW, FIT_WIDTH, MANUAL_ZOOM = 0, 1, 2
 
     def __init__(
-        self,
-        config=None,
-        filename=None,
-        output=None,
-        output_file=None,
-        output_dir=None,
+            self,
+            config=None,
+            filename=None,
+            output=None,
+            output_file=None,
+            output_dir=None,
     ):
         if output is not None:
             logger.warning(
@@ -69,6 +77,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if config is None:
             config = get_config()
         self._config = config
+        self.global_dict = None
 
         # set default shape colors
         Shape.line_color = QtGui.QColor(*self._config["shape"]["line_color"])
@@ -91,6 +100,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Whether we need to save or not.
         self.dirty = False
+
+        # track global dir path
+        self.curDirPath = None
 
         self._noSelectionSlot = False
 
@@ -140,6 +152,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.uniqLabelList.addItem(item)
                 rgb = self._get_rgb_by_label(label)
                 self.uniqLabelList.setItemLabel(item, label, rgb)
+
         self.label_dock = QtWidgets.QDockWidget(self.tr(u"Label List"), self)
         self.label_dock.setObjectName(u"Label List")
         self.label_dock.setWidget(self.uniqLabelList)
@@ -189,7 +202,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(scrollArea)
 
         features = QtWidgets.QDockWidget.DockWidgetFeatures()
-        for dock in ["flag_dock", "label_dock", "shape_dock", "file_dock"]:
+        dockList = ["flag_dock", "label_dock", "shape_dock", "file_dock"]
+        for dock in dockList:
             if self._config[dock]["closable"]:
                 features = features | QtWidgets.QDockWidget.DockWidgetClosable
             if self._config[dock]["floatable"]:
@@ -215,9 +229,16 @@ class MainWindow(QtWidgets.QMainWindow):
             "quit",
             self.tr("Quit application"),
         )
+        # open_ = action(
+        #     self.tr("&Open"),
+        #     self.openFile,
+        #     shortcuts["open"],
+        #     "open",
+        #     self.tr("Open image or label file"),
+        # )
         open_ = action(
-            self.tr("&Open"),
-            self.openFile,
+            self.tr("&Import CSV"),
+            self.openCSVFile,
             shortcuts["open"],
             "open",
             self.tr("Open image or label file"),
@@ -242,6 +263,30 @@ class MainWindow(QtWidgets.QMainWindow):
             self.openPrevImg,
             shortcuts["open_prev"],
             "prev",
+            self.tr(u"Open prev (hold Ctl+Shift to copy labels)"),
+            enabled=False,
+        )
+        openNextDir = action(
+            self.tr("&Next Dir"),
+            self.openNextDir,
+            shortcuts["open_next_dir"],
+            "next_dir",
+            self.tr(u"Open next (hold Ctl+Shift to copy labels)"),
+            enabled=False,
+        )
+        showMouseCoordinates = action(
+            self.tr("&Mouse Coordinates"),
+            self.showMouseCoordinates,
+            None,
+            "MouseCoordinates",
+            self.tr(u"MouseCoordinates"),
+            enabled=False,
+        )
+        openPrevDir = action(
+            self.tr("&Prev Dir"),
+            self.openPrevDir,
+            shortcuts["open_prev_dir"],
+            "prev_dir",
             self.tr(u"Open prev (hold Ctl+Shift to copy labels)"),
             enabled=False,
         )
@@ -294,7 +339,8 @@ class MainWindow(QtWidgets.QMainWindow):
             slot=self.enableSaveImageWithData,
             tip="Save image data in label file",
             checkable=True,
-            checked=self._config["store_data"],
+            # checked=self._config["store_data"],
+            checked=False,  # always set to false, we don't want to save image
         )
 
         close = action(
@@ -314,6 +360,16 @@ class MainWindow(QtWidgets.QMainWindow):
             checkable=True,
         )
         toggle_keep_prev_mode.setChecked(self._config["keep_prev"])
+
+        toggle_save_label_img = action(
+            self.tr("Save Label Image (B/W)"),
+            self.toggleSaveLabelImg,
+            None,
+            None,
+            None,
+            checkable=True,
+        )
+        toggle_save_label_img.setChecked(True)
 
         createMode = action(
             self.tr("Create Polygons"),
@@ -565,6 +621,7 @@ class MainWindow(QtWidgets.QMainWindow):
             close=close,
             deleteFile=deleteFile,
             toggleKeepPrevMode=toggle_keep_prev_mode,
+            toggleSaveLabelImg=toggle_save_label_img,
             delete=delete,
             edit=edit,
             copy=copy,
@@ -589,6 +646,8 @@ class MainWindow(QtWidgets.QMainWindow):
             zoomActions=zoomActions,
             openNextImg=openNextImg,
             openPrevImg=openPrevImg,
+            openNextDir=openNextDir,
+            openPrevDir=openPrevDir,
             fileMenuActions=(open_, opendir, save, saveAs, close, quit),
             tool=(),
             # XXX: need to add some actions here to activate the shortcut
@@ -603,6 +662,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 addPointToEdge,
                 None,
                 toggle_keep_prev_mode,
+                toggle_save_label_img
             ),
             # menu shown at right click
             menu=(
@@ -653,6 +713,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 open_,
                 openNextImg,
                 openPrevImg,
+                openNextDir,
+                openPrevDir,
                 opendir,
                 self.menus.recentFiles,
                 save,
@@ -708,8 +770,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.tool = (
             open_,
             opendir,
-            openNextImg,
-            openPrevImg,
+            # openNextImg,
+            # openPrevImg,
+            openNextDir,
+            openPrevDir,
             save,
             deleteFile,
             None,
@@ -765,7 +829,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings = QtCore.QSettings("labelme", "labelme")
         # FIXME: QSettings.value can return None on PyQt4
         self.recentFiles = self.settings.value("recentFiles", []) or []
-        size = self.settings.value("window/size", QtCore.QSize(600, 500))
+        size = self.settings.value("window/size", QtCore.QSize(600, 550))
         position = self.settings.value("window/position", QtCore.QPoint(0, 0))
         self.resize(size)
         self.move(position)
@@ -1003,8 +1067,8 @@ class MainWindow(QtWidgets.QMainWindow):
             action = QtWidgets.QAction(
                 icon, "&%d %s" % (i + 1, QtCore.QFileInfo(f).fileName()), self
             )
-            action.triggered.connect(functools.partial(self.loadRecent, f))
-            menu.addAction(action)
+            # action.triggered.connect(functools.partial(self.loadRecent, f))
+            # menu.addAction(action)
 
     def popLabelListMenu(self, point):
         self.menus.labelList.exec_(self.labelList.mapToGlobal(point))
@@ -1140,9 +1204,9 @@ class MainWindow(QtWidgets.QMainWindow):
             label_id += self._config["shift_auto_shape_color"]
             return LABEL_COLORMAP[label_id % len(LABEL_COLORMAP)]
         elif (
-            self._config["shape_color"] == "manual"
-            and self._config["label_colors"]
-            and label in self._config["label_colors"]
+                self._config["shape_color"] == "manual"
+                and self._config["label_colors"]
+                and label in self._config["label_colors"]
         ):
             return self._config["label_colors"][label]
         elif self._config["default_shape_color"]:
@@ -1415,11 +1479,21 @@ class MainWindow(QtWidgets.QMainWindow):
         for item in self.labelList:
             item.setCheckState(Qt.Checked if value else Qt.Unchecked)
 
+    def loadCSV(self, filename=None):
+        '''
+        Loads the CSV file
+        '''
+        # reads the csv file pointed to by the user
+        # geneartes the respective jsons in
+        self.global_dict = generate_mapping_from_csv(csv_file_name=filename)
+        print('successfully loaded the csv file')
+        print('done')
+
     def loadFile(self, filename=None):
         """Load the specified file, or the last opened file if None."""
         # changing fileListWidget loads file
         if filename in self.imageList and (
-            self.fileListWidget.currentRow() != self.imageList.index(filename)
+                self.fileListWidget.currentRow() != self.imageList.index(filename)
         ):
             self.fileListWidget.setCurrentRow(self.imageList.index(filename))
             self.fileListWidget.repaint()
@@ -1443,7 +1517,7 @@ class MainWindow(QtWidgets.QMainWindow):
             label_file_without_path = osp.basename(label_file)
             label_file = osp.join(self.output_dir, label_file_without_path)
         if QtCore.QFile.exists(label_file) and LabelFile.is_label_file(
-            label_file
+                label_file
         ):
             try:
                 self.labelFile = LabelFile(label_file)
@@ -1548,9 +1622,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def resizeEvent(self, event):
         if (
-            self.canvas
-            and not self.image.isNull()
-            and self.zoomMode != self.MANUAL_ZOOM
+                self.canvas
+                and not self.image.isNull()
+                and self.zoomMode != self.MANUAL_ZOOM
         ):
             self.adjustScale()
         super(MainWindow, self).resizeEvent(event)
@@ -1625,6 +1699,39 @@ class MainWindow(QtWidgets.QMainWindow):
     def loadRecent(self, filename):
         if self.mayContinue():
             self.loadFile(filename)
+            pass
+
+    def showMouseCoordinates(self, _value=False, dirpath=None):
+        self.mouse_coordinates_label = QLabel('Mouse Coordinates', self)
+        self.show()
+
+    def openNextDir(self, _value=False, dirpath=None):
+        try:
+            self.curDirPointerID += 1
+            if self.curDirPointerID > len(self.dirListPaths) - 1:
+                self.curDirPointerID = len(self.dirListPaths) - 1
+            targetDirPath = self.dirListPaths[self.curDirPointerID]
+            print('loading')
+            print(targetDirPath)
+            self.importDirImages(targetDirPath)
+        except:
+            print('selected dir path doesn\'t exist')
+            print(targetDirPath)
+        self.importDirImages(targetDirPath)
+
+    def openPrevDir(self, _value=False):
+        try:
+            self.curDirPointerID -= 1
+            if self.curDirPointerID < 0:
+                self.curDirPointerID = 0
+            targetDirPath = self.dirListPaths[self.curDirPointerID]
+            print('loading')
+            print(targetDirPath)
+            self.importDirImages(targetDirPath)
+        except:
+            print('selected dir path doesn\'t exist')
+            print(targetDirPath)
+        self.importDirImages(targetDirPath)
 
     def openPrevImg(self, _value=False):
         keep_prev = self._config["keep_prev"]
@@ -1647,6 +1754,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.loadFile(filename)
 
         self._config["keep_prev"] = keep_prev
+
+    def showMouseLocationLabel(self, _value=False, load=True):
+        pass
 
     def openNextImg(self, _value=False, load=True):
         keep_prev = self._config["keep_prev"]
@@ -1672,8 +1782,29 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if self.filename and load:
             self.loadFile(self.filename)
+            pass
 
         self._config["keep_prev"] = keep_prev
+
+    def openCSVFile(self, _value=False):
+        if not self.mayContinue():
+            return
+        path = osp.dirname(str(self.filename)) if self.filename else "."
+        formats = ['*.csv']
+        filters = self.tr("CSV files (%s)") % " ".join(
+            formats
+        )
+        filename = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            self.tr("%s - Choose Image or Label file") % __appname__,
+            path,
+            filters,
+        )
+        if QT5:
+            filename, _ = filename
+        filename = str(filename)
+        if filename:
+            self.loadCSV(filename)
 
     def openFile(self, _value=False):
         if not self.mayContinue():
@@ -1697,6 +1828,7 @@ class MainWindow(QtWidgets.QMainWindow):
         filename = str(filename)
         if filename:
             self.loadFile(filename)
+            self.loadCSV(filename)
 
     def changeOutputDirDialog(self, _value=False):
         default_output_dir = self.output_dir
@@ -1876,6 +2008,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def toggleKeepPrevMode(self):
         self._config["keep_prev"] = not self._config["keep_prev"]
 
+    def toggleSaveLabelImg(self):
+        self._config['keep_save_label'] = not self._config["keep_save_label"]
+
     def removeSelectedPoint(self):
         self.canvas.removeSelectedPoint()
         if not self.canvas.hShape.points:
@@ -1893,7 +2028,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "proceed anyway?"
         ).format(len(self.canvas.selectedShapes))
         if yes == QtWidgets.QMessageBox.warning(
-            self, self.tr("Attention"), msg, yes | no, yes
+                self, self.tr("Attention"), msg, yes | no, yes
         ):
             self.remLabels(self.canvas.deleteSelected())
             self.setDirty()
@@ -1933,7 +2068,44 @@ class MainWindow(QtWidgets.QMainWindow):
                 | QtWidgets.QFileDialog.DontResolveSymlinks,
             )
         )
+        print('targetDirPath', targetDirPath)
+        if targetDirPath == '':
+            return
+        self.curDirPath = targetDirPath
+        self.globalDirPath = '/'.join(targetDirPath.split("/")[:-1]) + '/'
+        self.dirListNames = [each_dir for each_dir in os.listdir(
+            self.globalDirPath) if os.path.isdir(
+            self.globalDirPath + each_dir + '/')]
+
+        new_list = []
+        for each_dir in self.dirListNames:
+            try:
+                new_list.append(int(each_dir))
+            except:
+                continue
+        new_list.sort()
+        self.dirListPaths = []
+        for each_dir in new_list:
+            self.dirListPaths.append(self.globalDirPath + str(each_dir) + '/')
+        # global_dict contains mapping from csv (doi, folder id, etc.)
+        # this mapping is necessary to generate the json to mark doi locations
+
+        progress = QProgressDialog('Generating results...', None, 0, 100, self)
+        progress.setWindowTitle("Processing ...")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setRange(1, 100)
+        progress.setValue(0)
+
+        generate_json_using_csv(self.global_dict, self.dirListPaths, progress)
+
+        self.curDirNumber = targetDirPath.split('/')[-1]
+        self.curDirPointerID = 0
+        targetDirPath = self.dirListPaths[self.curDirPointerID]
+
         self.importDirImages(targetDirPath)
+        progress.setValue(100)
+        progress.close()
+        # self.generate_json_using_images_csv()
 
     @property
     def imageList(self):
@@ -1942,6 +2114,27 @@ class MainWindow(QtWidgets.QMainWindow):
             item = self.fileListWidget.item(i)
             lst.append(item.text())
         return lst
+
+    def updateStatus(self, status):
+        self.statusBar().showMessage(self.tr(status))
+
+    def generate_json_using_images_csv():
+        '''
+        goes to the target path
+        generates the .json files to create polygon around the doi locations
+        '''
+        # parse through self.dirListPaths
+        # open self.csv_data_dict['defect_id']
+        # generate respective json
+        json_dict = {}
+        json_dict["version"] = "4.5.7"
+        json_dict["flags"] = {}
+        json_dict["shapes"] = [{}]
+        json_dict["imagePath"] = []
+        json_dict["imageData"] = None
+        json_dict["imageHeight"] = 4084
+        json_dict["imageWidth"] = 480
+        # self.csv_data_dict
 
     def importDroppedImageFiles(self, imageFiles):
         extensions = [
@@ -1952,7 +2145,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.filename = None
         for file in imageFiles:
             if file in self.imageList or not file.lower().endswith(
-                tuple(extensions)
+                    tuple(extensions)
             ):
                 continue
             label_file = osp.splitext(file)[0] + ".json"
@@ -1962,7 +2155,7 @@ class MainWindow(QtWidgets.QMainWindow):
             item = QtWidgets.QListWidgetItem(file)
             item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             if QtCore.QFile.exists(label_file) and LabelFile.is_label_file(
-                label_file
+                    label_file
             ):
                 item.setCheckState(Qt.Checked)
             else:
@@ -1978,6 +2171,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def importDirImages(self, dirpath, pattern=None, load=True):
         self.actions.openNextImg.setEnabled(True)
         self.actions.openPrevImg.setEnabled(True)
+        self.actions.openNextDir.setEnabled(True)
+        self.actions.openPrevDir.setEnabled(True)
 
         if not self.mayContinue() or not dirpath:
             return
@@ -1995,7 +2190,7 @@ class MainWindow(QtWidgets.QMainWindow):
             item = QtWidgets.QListWidgetItem(filename)
             item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             if QtCore.QFile.exists(label_file) and LabelFile.is_label_file(
-                label_file
+                    label_file
             ):
                 item.setCheckState(Qt.Checked)
             else:

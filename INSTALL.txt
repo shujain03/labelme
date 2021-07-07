@@ -1,0 +1,6 @@
+conda create -n pyqt5 python=3.7
+conda activate pyqt5
+python -m pip install --upgrade pip
+conda install numpy scipy scikit-image scikit-learn
+pip install opencv-python sip==5.3.0 qscintilla pyqt5 pyqt5-tools
+pip install qtpy colorama termcolor
